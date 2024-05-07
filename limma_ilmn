@@ -1,0 +1,157 @@
+library(limma)
+library(pheatmap)
+library(ggplot2)
+library(RColorBrewer)
+# This script is designed to detect differentially 
+# expressed genes with limma assuming that the data
+# is already normalized
+
+setwd(<working_directory>)
+
+# Load GSE15573 data set using GEOquery, here I loaded saved 
+# data object from my system
+load("datasets/GSE15573/GSE15573_ESet.RData")
+show(eset) # The data was normalized using quantile normalization in BeadStudio
+
+# lmFit() function from limma requires log transformed data
+# Here we will apply variance stabilizing normalization to make array
+# intensities log transfomed and normally distributed. We need to 
+# re-create expressionSet object with transformed data
+exp_vsn <- normalizeVSN(exprs(eset))
+meanSdPlot(exp_vsn)
+eset <- ExpressionSet(assayData = exp_vsn, phenoData = phenoData(eset), 
+                      featureData = featureData(eset))
+
+
+# --------------------------------------------------------------------# 
+# Examine metadata
+head(pData(eset))
+sample_data <- pData(eset)
+
+# Select clinico-pathological variables from sample metadata
+sample_data <- data.frame( Trait = sample_data$characteristics_ch1,
+                           Gender = sample_data$characteristics_ch1.1,
+                           Age = sample_data$characteristics_ch1.2)
+head(sample_data)
+
+# Modify the variable definitions to make them more palatable
+sample_data$Trait[sample_data$Trait == "status: Rheumatoid Arthritis Patient"] <- "RA"
+sample_data$Trait[sample_data$Trait == "status: Control"] <- "Control"
+sample_data$Gender <- gsub("gender: " , "", sample_data$Gender)
+sample_data$Age <- gsub("age: " , "", sample_data$Age)
+class(sample_data$Age) # age is still a character, we need to turn it into numbers
+sample_data$Age <- as.numeric(sample_data$Age)
+class(sample_data$Age)
+
+# We can separate the patients into middle-aged and old categories
+age_group<-cut(sample_data$Age, 
+               breaks=c(44, 58, 81), right = T)
+age_group
+sample_data$age_group <- age_group
+
+# Add modified variables to pData object
+pData(eset)$Trait <- sample_data$Trait
+pData(eset)$Gender <- sample_data$Gender
+pData(eset)$Age <- sample_data$Age
+pData(eset)$Age_group <- sample_data$age_group
+head(pData(eset))
+
+# Create model matrix to compare RA samples to controls, 
+# while accounting for biological factors of no interest, i.e.
+# age and gender
+# The variables need to be converted to factors
+pData(eset)$Trait <- factor(pData(eset)$Trait, levels = c("Control", "RA"))
+# Note, that we set Control as a reference level
+pData(eset)$Trait
+
+# Convert other variables to factors
+pData(eset)$Gender <- factor(pData(eset)$Gender)
+pData(eset)$Gender
+pData(eset)$Age_group <- factor(pData(eset)$Age_group)
+pData(eset)$Age_group
+
+# Create design matrix
+Trait <- pData(eset)$Trait
+Gender <- pData(eset)$Gender
+Age_group <- pData(eset)$Age_group
+design <- model.matrix(~Gender + Age_group + Trait)
+head(design)
+
+# Fit the model
+fit <- lmFit(eset, design)
+fit <- eBayes(fit)
+res <- topTable(fit, coef = "TraitRA", number = dim(fit$genes)[1], 
+                adjust.method = "BH") 
+head(res)
+write.csv(res, file = "GSE15573_RA_vs_Controls.csv")
+
+# How many genes are significant (adj.p.value < 0.05 and absolute 
+# fold change > 1.5)
+sum(res$adj.P.Val < 0.05) # 406 probes
+# Save the results for significant probes
+write.csv(res[res$adj.P.Val < 0.05,], 
+          file = "GSE15573_RA_vs_Controls_sig_only.csv")
+
+
+# Plot a heatmap of differentially expressed probes
+sig_probes <- res[which(res$adj.P.Val < 0.05),]$ID
+expr <- exprs(eset)
+sig_exp <- expr[rownames(expr) %in% sig_probes,]
+
+annot <- data.frame(Trait = pData(eset)$Trait,
+                    Gender = pData(eset)$Gender,
+                    Age_group = pData(eset)$Age_group)
+rownames(annot) <- rownames(pData(eset))
+head(annot)
+
+# Clustering and heatmap for significant probes (adj. p-values < 0.05)
+pdf("GSE15573_heatmap_significant.pdf", width = 7, height = 6)
+pheatmap(sig_exp, 
+         color = colorRampPalette(rev(brewer.pal(n = 7, name =
+                                                   "RdYlBu")))(100),
+         scale="row", 
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         clustering_method = "ward.D2",
+         annotation_col = annot, 
+         show_rownames = F)
+dev.off()
+
+# Create MA plot showing the relationship between average expression
+# and log fold change
+res <- res[with(res, order(logFC)),]
+res$threshold <- as.factor(res$adj.P.Val < 0.05)
+ggplot(data=res, aes(x=log2(AveExpr), y=logFC, colour=threshold)) + 
+  geom_point(alpha=0.4, size=1.8) + 
+  geom_hline(aes(yintercept = 0), colour = "blue", size = 1.2) +
+  ylim(c(min(res$logFC), max(res$logFC))) + 
+  xlab("Mean expression") + 
+  ylab("Log2 Fold Change") + 
+  theme(axis.title.x = element_text(face = "bold", size = 15),
+        axis.text.x = element_text(face = "bold", size = 12)) +
+  theme(axis.title.y = element_text(face = "bold", size = 15),
+        axis.text.y = element_text(face = "bold", size = 12)) +
+  scale_colour_discrete(name = "p.adjusted < 0.05") +
+  theme(legend.title = element_text(face = "bold", size = 15)) +
+  theme(legend.text = element_text(size = 14))
+ggsave("GSE15573_MAplot.pdf", device = "pdf", width = 7, height = 5)
+
+# Create volcano plot
+res <- res[with(res, order(logFC)),]
+#res$threshold <- as.factor(abs(res$logFC) > 0.59 & res$adj.P.Val < 0.05)
+res$threshold <- as.factor(res$adj.P.Val < 0.05)
+ggplot(data=res, aes(x=logFC, y=-log10(adj.P.Val), colour=threshold)) + 
+  geom_point(alpha=0.4, size=1.75) + xlim(c(min(res$logFC), 
+                                            c(max(res$logFC)))) +
+  ylim(c(min(-log10(res$adj.P.Val)), max(-log10(res$adj.P.Val)))) + 
+  xlab("log2 fold change") + 
+  ylab("-log10 adjusted p-value") +
+  theme(axis.text=element_text(size=12, face="bold")) +
+  theme(axis.title=element_text(size=14)) +
+  theme(legend.title=element_text(size=14)) +
+  theme(legend.text=element_text(size=12))
+ggsave("GSE15573_volcano_plot.pdf", device = "pdf", width = 5, height = 7) 
+
+
+
+
