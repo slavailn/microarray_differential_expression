@@ -7,7 +7,7 @@ library(ggrepel)
 library(PCAtools)
 
 # Detect and model batch effects using SVA and limma
-setwd("C:/misc/")
+setwd(<>)
 
 # Load GSE15573 data set using GEOquery, here I loaded saved 
 # data object from my system
@@ -200,14 +200,26 @@ ggsave("GSE15573_screeplot.pdf", device = "pdf", units = "in",
        width = 7, height = 7)
 
 # -------------------- Detect DEGs after correction ----------------------- #
-# Create expression set object with SVA-corrected data
-eset_cor <- ExpressionSet(assayData = edata_cor, phenoData = phenoData(eset), 
-                      featureData = featureData(eset))
-design <- model.matrix(~Gender + Age_group + Trait, data = pData(eset_cor))
+# Create expression set object with VSN normalized data
+# Note, that we should not use SVA corrected data in differential expression
+# analysis. Instead, we should supply latent variables detected with SVA
+# as covariates in model matrix
+expr_vsn <- normalizeVSN(exprs(eset))
+eset_vsn <- ExpressionSet(assayData = expr_vsn, phenoData = phenoData(eset), 
+                           featureData = featureData(eset))
+pheno <- pData(eset_vsn)
+surrogate <- svobj$sv
+colnames(surrogate) <- c("SV1", "SV2", "SV3", "SV4", "SV5", "SV6")
+pheno <- cbind(pData(eset_vsn), surrogate) # Add surrogate variables to pheno data 
+head(pheno)
+# Create model matrix with adjustment and surrogate variables
+design <- model.matrix(~Gender + Age_group + Trait + SV1 +
+                       SV2 + SV3 + SV4 + SV5 + SV6, 
+                       data = pheno)
 head(design)
 
 # Fit the model
-fit <- lmFit(eset_cor, design)
+fit <- lmFit(eset_vsn, design)
 fit <- eBayes(fit)
 res <- topTable(fit, coef = "TraitRA", number = dim(fit$genes)[1], 
                 adjust.method = "BH") 
@@ -280,7 +292,5 @@ ggplot(data=res, aes(x=logFC, y=-log10(adj.P.Val), colour=threshold)) +
   theme(legend.text=element_text(size=12))
 ggsave("GSE15573_volcano_plot_corrected.pdf", device = "pdf", 
        width = 5, height = 7) 
-
-
 
 
